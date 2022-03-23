@@ -1,16 +1,33 @@
 #include "abb_robot_driver/hardware_interface.hpp"
 
-#include <google/protobuf/text_format.h>
+// System
+#include <yaml-cpp/node/parse.h>
+#include <yaml-cpp/yaml.h>
 
 #include <algorithm>
+#include <csignal>
+#include <cstring>
+#include <memory>
+#include <string>
+
+// ROS
+#include <rcl_yaml_param_parser/parser.h>
+
 #include <hardware_interface/types/hardware_interface_return_values.hpp>
 #include <hardware_interface/types/hardware_interface_type_values.hpp>
+#include <rclcpp/rate.hpp>
 #include <rclcpp/rclcpp.hpp>
 
+// ABB
 #include "abb_robot_driver/utils.hpp"
 
 namespace abb {
 namespace robot {
+
+constexpr double RWS_RECONNECTION_WAIT_TIME = 1.0;
+
+constexpr unsigned int RWS_MAX_CONNECTION_ATTEMPTS = 5;
+
 CallbackReturn ABBPositionHardwareInterface::on_init(const hardware_interface::HardwareInfo& system_info) {
   if (hardware_interface::SystemInterface::on_init(system_info) != CallbackReturn::SUCCESS) {
     return CallbackReturn::ERROR;
@@ -72,14 +89,18 @@ CallbackReturn ABBPositionHardwareInterface::on_init(const hardware_interface::H
 
 CallbackReturn ABBPositionHardwareInterface::on_activate(const rclcpp_lifecycle::State& previous_state) {
   (void)previous_state;
-
-  initialize_robot_controller_description();
+  if (!initialize_rws_manager()) {
+    return CallbackReturn::ERROR;
+  }
   try {
     initializeMotionData(motion_data_, robot_controller_description_);
   } catch (...) {
     return CallbackReturn::ERROR;
   }
-
+  if (!initialize_egm_manager()) {
+    return CallbackReturn::ERROR;
+  }
+  /*
   if (info_.hardware_parameters.find("egm_mech_unit_group") == info_.hardware_parameters.end()) {
     mech_unit_group_ = "";
   } else {
@@ -102,6 +123,7 @@ CallbackReturn ABBPositionHardwareInterface::on_activate(const rclcpp_lifecycle:
   }
 
   egm_manager_ = std::make_unique<EGMManager>(egm_channel_configurations);
+  */
   return CallbackReturn::SUCCESS;
 }
 
@@ -173,10 +195,34 @@ std::vector<hardware_interface::CommandInterface> ABBPositionHardwareInterface::
   return command_interfaces;
 }
 
-bool ABBPositionHardwareInterface::initialize_robot_controller_description() {
-  std::string robot_controller_description = info_.hardware_parameters["robot_controller_description"];
+bool ABBPositionHardwareInterface::initialize_rws_manager() {
+  auto robot_ip = info_.hardware_parameters["robot_ip"];
 
-  if (!google::protobuf::TextFormat::ParseFromString(robot_controller_description, &robot_controller_description_)) {
+  auto robot_nickname = info_.hardware_parameters["robot_nickname"];
+
+  auto rws_port_number = std::stoul(info_.hardware_parameters["rws_port_number"]);
+
+  auto no_connection_timeout = std::stoi(info_.hardware_parameters["no_connection_timeout"]);
+
+  rws_manager_ =
+      std::make_unique<RWSManager>(robot_ip, rws_port_number, rws::SystemConstants::General::DEFAULT_USERNAME,
+                                   rws::SystemConstants::General::DEFAULT_USERNAME);
+
+  auto rate = rclcpp::Rate(1.0 / RWS_RECONNECTION_WAIT_TIME);
+
+  unsigned int attempt = 0;
+  bool connected = false;
+  while (rclcpp::ok() && (no_connection_timeout || attempt++ < RWS_MAX_CONNECTION_ATTEMPTS)) {
+    try {
+      robot_controller_description_ = rws_manager_->collectAndParseSystemData(robot_nickname);
+      connected = true;
+      break;
+    } catch (const std::runtime_error& exception) {
+      rate.sleep();
+    }
+  }
+
+  if (!connected) {
     return false;
   }
 
@@ -189,8 +235,43 @@ bool ABBPositionHardwareInterface::initialize_robot_controller_description() {
   if (!robot_controller_description_.system_indicators().options().egm()) {
     return false;
   }
-
   return true;
+}
+
+bool ABBPositionHardwareInterface::initialize_egm_manager() {
+  initialize_egm_parameters();
+  std::vector<EGMManager::ChannelConfiguration> egm_channel_configurations{};
+
+  for (const auto& parameters : egm_channel_parameters_) {
+    if (verify_parameters(parameters)) {
+      auto mug{findMechanicalUnitGroup(parameters.mech_unit_group, robot_controller_description_)};
+      egm_channel_configurations.emplace_back(parameters.port_number, mug);
+    }
+  }
+
+  if (egm_channel_configurations.empty()) {
+    return false;
+  }
+
+  egm_manager_ = std::make_unique<EGMManager>(egm_channel_configurations);
+  return true;
+}
+
+void ABBPositionHardwareInterface::initialize_egm_parameters() {
+  auto egm_config_path = info_.hardware_parameters["egm_config_path"];
+  auto node = YAML::LoadFile(egm_config_path);
+
+  for (const auto& p : node["egm"]) {
+    EGMChannelParameters params;
+    params.name = p.first.as<std::string>();
+    params.port_number = node["egm"][params.name]["port_number"].as<unsigned>();
+    try {
+      params.mech_unit_group = node["egm"][params.name]["mech_unit_group"].as<std::string>();
+    } catch (...) {
+      params.mech_unit_group = "";
+    }
+    egm_channel_parameters_.push_back(params);
+  }
 }
 
 bool ABBPositionHardwareInterface::verify_parameters(const EGMChannelParameters& parameters) {

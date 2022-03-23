@@ -8,10 +8,11 @@
 #include <vector>
 
 // ros2_control hardware_interface
+#include <hardware_interface/visibility_control.h>
+
 #include <hardware_interface/hardware_info.hpp>
 #include <hardware_interface/system_interface.hpp>
 #include <hardware_interface/types/hardware_interface_return_values.hpp>
-#include <hardware_interface/visibility_control.h>
 
 // ROS
 #include <rclcpp/macros.hpp>
@@ -19,6 +20,7 @@
 
 // ABB
 #include <abb_egm_rws_managers/egm_manager.h>
+#include <abb_egm_rws_managers/rws_manager.h>
 
 namespace abb {
 namespace robot {
@@ -39,18 +41,22 @@ class ABBPositionHardwareInterface : public hardware_interface::SystemInterface 
   hardware_interface::return_type write() final;
 
  protected:
-  struct EGMChannelParameters
-  {
+  struct EGMChannelParameters {
     std::string name;
     unsigned short port_number;
     std::string mech_unit_group;
   };
 
-  bool initialize_robot_controller_description();
+  bool initialize_rws_manager();
+
+  bool initialize_egm_manager();
+
+  void initialize_egm_parameters();
 
   bool verify_parameters(const EGMChannelParameters &egm_channel_parameters);
 
   std::unique_ptr<EGMManager> egm_manager_;
+  std::unique_ptr<RWSManager> rws_manager_;
 
   RobotControllerDescription robot_controller_description_;
 
