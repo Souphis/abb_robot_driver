@@ -1,0 +1,9 @@
+<library path="abb_robot_driver">
+  <class name="abb_robot_driver/ABBPositionHardwareInterface"
+         type="abb::robot::ABBPositionHardwareInterface"
+         base_class_type="hardware_interface::SystemInterface">
+    <description>
+		ROS2 Control ABB demo driver.
+    </description>
+  </class>
+</library>
